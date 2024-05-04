@@ -227,6 +227,32 @@ Graph computeVisibilityGraph(Vertex_const_handle start, Vertex_const_handle end,
     bool is_edge = false;
     bool visible = true;
 
+    auto check_interior_diagonal = [&visible](auto c, auto other_pt) {
+      // Check if this diagonal is obstacle-interior
+      auto c_next = std::next(c);
+      auto &A = c->source()->point();
+      auto &B = c->target()->point();
+      auto &C = c_next->target()->point();
+      auto &D = other_pt->point();
+      std::cout << "compare A, B, C, D: " << A << ", " << B << ", " << C << ", "
+                << D << "\n";
+      if (CGAL::orientation(A, B, C) == CGAL::Sign::LEFT_TURN) {
+        std::cout << "left turn\n";
+        if (!(CGAL::orientation(A, B, D) == CGAL::Sign::LEFT_TURN &&
+              CGAL::orientation(B, C, D) == CGAL::Sign::LEFT_TURN)) {
+          std::cout << B << " - " << other_pt->point() << " is skipped\n";
+          visible = false;
+        }
+      } else {
+        std::cout << "right turn\n";
+        if (CGAL::orientation(A, B, D) != CGAL::Sign::LEFT_TURN &&
+            CGAL::orientation(B, C, D) != CGAL::Sign::LEFT_TURN) {
+          std::cout << B << " - " << other_pt->point() << " is skipped\n";
+          visible = false;
+        }
+      }
+    };
+
     if (c_1.has_value() && c_2.has_value() && ci_1 == ci_2) {
       // same ccb
       auto &c_1v = *c_1;
@@ -235,33 +261,12 @@ Graph computeVisibilityGraph(Vertex_const_handle start, Vertex_const_handle end,
         // Add outer edge
         is_edge = true;
         visible = false;
-      } else {
-        // Check if this diagonal is obstacle-interior
-        auto c_1_next = std::next(c_1v);
-        auto &A = c_1v->source()->point();
-        auto &B = c_1v->target()->point();
-        auto &C = c_1_next->target()->point();
-        auto &D = pt_2->point();
-        std::cout << "compare A, B, C, D: " << A << ", " << B << ", " << C << ", " << D << "\n";
-        if (CGAL::orientation(A, B, C) == CGAL::Sign::LEFT_TURN) {
-          std::cout << "left turn\n";
-          if (!(CGAL::orientation(A, B, D) == CGAL::Sign::LEFT_TURN &&
-                CGAL::orientation(B, C, D) == CGAL::Sign::LEFT_TURN)) {
-            std::cout << pt_1->point() << " - " << pt_2->point()
-                      << " is skipped\n";
-            visible = false;
-          }
-        } else {
-          std::cout << "right turn\n";
-          if (CGAL::orientation(A, B, D) != CGAL::Sign::LEFT_TURN &&
-              CGAL::orientation(B, C, D) != CGAL::Sign::LEFT_TURN) {
-            std::cout << pt_1->point() << " - " << pt_2->point()
-                      << " is skipped\n";
-            visible = false;
-          }
-        }
       }
     }
+    if (visible && c_1.has_value())
+      check_interior_diagonal(*c_1, pt_2);
+    if (visible && c_2.has_value())
+      check_interior_diagonal(*c_2, pt_1);
 
     for (auto edge = obstacles.edges_begin();
          visible && edge != obstacles.edges_end(); ++edge) {
