@@ -1,5 +1,6 @@
 #include <CGAL/Arrangement_2.h>
 #include <CGAL/Arr_segment_traits_2.h>
+#include <CGAL/Rotational_sweep_visibility_2.h>
 #include <boost/graph/adjacency_list.hpp>
 #include <boost/graph/dijkstra_shortest_paths.hpp>
 #include <iostream>
@@ -12,19 +13,17 @@ void drawInput();
 void drawObstacles();
 void drawVisibilityGraph();
 void drawShortestPath();
-void addPoint(float x, float y);
+void addPoint(double x, double y);
 void removeLastPoint();
 void finishPolygon();
 void finishPolygons();
 void finish();
 
 // Variables for zooming and panning
-GLfloat zoomFactor = 1.0f;
-GLfloat panX = 0.0f;
-GLfloat panY = 0.0f;
-bool isDragging = false;
-int lastMouseX, lastMouseY;
-int windowWidth, windowHeight;
+bool is_dragging = false;
+int last_mouse_x, last_mouse_y;
+int window_width, window_height;
+std::pair<double, double> corners[2] = {{-1, -1}, {1, 1}};
 
 // Function to render the scene
 void renderScene() {
@@ -34,17 +33,19 @@ void renderScene() {
   glLoadIdentity();
 
   // Apply zoom and pan transformations
-  glTranslatef(panX, panY, 0.0f);
-  glScalef(zoomFactor, zoomFactor, 1.0f);
+  std::pair<double, double> e = {corners[1].first - corners[0].first,
+                                 corners[1].second - corners[0].second};
+  glScaled(window_width / e.first, window_height / e.second, 1.0);
+  glTranslated(-corners[0].first, -corners[0].second, 0);
 
   // Draw input
   drawInput();
 
-  // Draw obstacles
-  drawObstacles();
-
   // Draw visibility graph
   drawVisibilityGraph();
+
+  // Draw obstacles
+  drawObstacles();
 
   // Draw shortest path
   drawShortestPath();
@@ -54,12 +55,24 @@ void renderScene() {
 
 // Function to handle window resizing
 void reshape(int width, int height) {
-  windowWidth = width;
-  windowHeight = height;
+  window_width = width;
+  window_height = height;
   glViewport(0, 0, width, height);
   glMatrixMode(GL_PROJECTION);
   glLoadIdentity();
   gluOrtho2D(0, width, 0, height);
+
+  double e = std::min(corners[1].first - corners[0].first,
+                      corners[1].second - corners[0].second);
+  double ratio_x = e, ratio_y = e;
+
+  if (width >= height)
+    ratio_x *= width * 1.0 / height;
+  else
+    ratio_y *= height * 1.0 / width;
+
+  corners[1].first = corners[0].first + ratio_x;
+  corners[0].second = corners[1].second - ratio_y;
 }
 
 // Function to handle keyboard input
@@ -72,15 +85,15 @@ void keyboard(unsigned char key, int x, int y) {
     finishPolygon();
     glutPostRedisplay(); // Request redraw
     break;
-  case 'Z':
+  case 'z':
     removeLastPoint();
     glutPostRedisplay(); // Request redraw
     break;
-  case 'P':
+  case 'p':
     finishPolygons();
     glutPostRedisplay(); // Request redraw
     break;
-  case 'C':
+  case 'c':
     finish();
     glutPostRedisplay(); // Request redraw
     break;
@@ -93,33 +106,39 @@ void keyboard(unsigned char key, int x, int y) {
 void mouseClick(int button, int state, int x, int y) {
   if (button == GLUT_LEFT_BUTTON && state == GLUT_DOWN) {
     // Start dragging
-    isDragging = true;
-    lastMouseX = x;
-    lastMouseY = y;
+    is_dragging = true;
+    last_mouse_x = x;
+    last_mouse_y = y;
   } else if (button == GLUT_LEFT_BUTTON && state == GLUT_UP) {
     // Stop dragging
-    isDragging = false;
+    is_dragging = false;
   } else if (button == GLUT_RIGHT_BUTTON && state == GLUT_DOWN) {
-    addPoint((x - panX) / zoomFactor,
-             ((windowHeight - y - 1) - panY) / zoomFactor);
+    addPoint(corners[0].first +
+                 x * 1.0 / window_width * (corners[1].first - corners[0].first),
+             corners[0].second + (1 - y * 1.0 / window_height) *
+                                     (corners[1].second - corners[0].second));
     glutPostRedisplay(); // Request redraw
   }
 }
 
 // Function to handle mouse drag events
 void mouseDrag(int x, int y) {
-  if (isDragging) {
+  if (is_dragging) {
     // Calculate delta mouse movement
-    int deltaX = x - lastMouseX;
-    int deltaY = y - lastMouseY;
+    int deltaX = x - last_mouse_x;
+    int deltaY = y - last_mouse_y;
 
-    // Update pan
-    panX += deltaX;
-    panY -= deltaY; // Y-axis is inverted in screen coordinates
+    std::pair<double, double> pan = {
+        -deltaX * 1.0 / window_width * (corners[1].first - corners[0].first),
+        deltaY * 1.0 / window_height * (corners[1].second - corners[0].second)};
+    corners[0].first += pan.first;
+    corners[0].second += pan.second;
+    corners[1].first += pan.first;
+    corners[1].second += pan.second;
 
     // Update last mouse position
-    lastMouseX = x;
-    lastMouseY = y;
+    last_mouse_x = x;
+    last_mouse_y = y;
 
     glutPostRedisplay(); // Request redraw
   }
@@ -127,12 +146,24 @@ void mouseDrag(int x, int y) {
 
 // Function to handle mouse wheel events
 void mouseWheel(int wheel, int direction, int x, int y) {
-  if (direction > 0) {
-    // Zoom in
-    zoomFactor *= 1.1f;
-  } else {
-    // Zoom out
-    zoomFactor /= 1.1f;
+  auto lerp = [](auto lhs, auto rhs, auto coef) {
+    return lhs * (1 - coef) + rhs * coef;
+  };
+
+  if (direction != 0) {
+    double res_coef = pow(0.9, direction);
+
+    std::pair<double, double>
+        pt = {x * 1.0 / window_width, 1 - y * 1.0 / window_height},
+        coef = {lerp(pt.first, 0.5, res_coef), lerp(pt.second, 0.5, res_coef)},
+        new_center = {lerp(corners[0].first, corners[1].first, coef.first),
+                      lerp(corners[0].second, corners[1].second, coef.second)},
+        new_size = {(corners[1].first - corners[0].first) * res_coef,
+                    (corners[1].second - corners[0].second) * res_coef};
+    corners[0] = {new_center.first - new_size.first / 2,
+                  new_center.second - new_size.second / 2};
+    corners[1] = {new_center.first + new_size.first / 2,
+                  new_center.second + new_size.second / 2};
   }
 
   glutPostRedisplay(); // Request redraw
@@ -159,9 +190,9 @@ typedef boost::graph_traits<Graph>::vertex_descriptor Vertex;
 typedef boost::graph_traits<Graph>::edge_descriptor Edge;
 
 // Function to compute visibility graph
-void computeVisibilityGraph(Vertex_const_handle start, Vertex_const_handle end,
-                            const Arrangement_2 &obstacles, Graph &graph,
-                            std::vector<Point_2> &vertex2point) {
+Graph computeVisibilityGraph(Vertex_const_handle start, Vertex_const_handle end,
+                             const Arrangement_2 &obstacles,
+                             std::vector<Point_2> &vertex2point) {
   // Compute visibility graph
   auto for_each_ccb_vertex =
       [](Arrangement_2::Ccb_halfedge_const_circulator ccb, auto &&callback) {
@@ -170,6 +201,19 @@ void computeVisibilityGraph(Vertex_const_handle start, Vertex_const_handle end,
           callback(cur);
         } while (++cur != ccb);
       };
+  Graph graph;
+  auto add_edge = [&](const auto &pt_1, int i_1, const auto &pt_2, int i_2) {
+    double distance = sqrt(
+        CGAL::to_double(CGAL::squared_distance(pt_1->point(), pt_2->point())));
+    Edge edge;
+    bool success;
+    boost::tie(edge, success) = boost::add_edge(i_1, i_2, graph);
+    if (success) {
+      boost::put(boost::edge_weight, graph, edge, distance);
+    }
+    std::cout << pt_1->point() << " is visible from " << pt_2->point()
+              << " with distance " << distance << "\n";
+  };
   auto check_points =
       [&](Vertex_const_handle pt_1, int i_1,
           std::optional<Arrangement_2::Ccb_halfedge_const_circulator> c_1,
@@ -238,30 +282,17 @@ void computeVisibilityGraph(Vertex_const_handle start, Vertex_const_handle end,
       }
     }
 
-    auto add_edge = [&](auto &pt_1, int i_1, auto &pt_2, int i_2) {
-      double distance =
-          sqrt(CGAL::to_double(CGAL::squared_distance(pt_1->point(), pt_2->point())));
-      Edge edge;
-      bool success;
-      boost::tie(edge, success) = boost::add_edge(i_1, i_2, graph);
-      if (success) {
-        boost::put(boost::edge_weight, graph, edge, distance);
-      }
-      std::cout << pt_1->point() << " is visible from " << pt_2->point()
-                << " with distance " << distance << "\n";
-    };
-
     if (visible || is_edge) {
       add_edge(pt_1, i_1, pt_2, i_2);
       if (is_edge)
         add_edge(pt_2, i_2, pt_1, i_1);
     }
   };
-  auto for_each_map_vertex = [&](auto &&callback) {
+  auto for_each_map_vertex = [&](const Arrangement_2 &arr, auto &&callback) {
     int i = 0;
     auto idx_callback = [&](Arrangement_2::Ccb_halfedge_const_circulator pt,
                             int c) mutable { callback(pt->target(), i++, c, pt); };
-    auto outer = obstacles.unbounded_face();
+    auto outer = arr.unbounded_face();
     callback(start, i++, -1, {});
     callback(end, i++, -1, {});
     int c = 0;
@@ -275,19 +306,85 @@ void computeVisibilityGraph(Vertex_const_handle start, Vertex_const_handle end,
     }
   };
 
+  graph = Graph(obstacles.number_of_vertices());
   for_each_map_vertex(
+      obstacles,
       [&](Vertex_const_handle pt_1, int i_1, int ci_1,
           std::optional<Arrangement_2::Ccb_halfedge_const_circulator> c_1) {
         std::cout << ci_1 << ": " << i_1 << ": " << pt_1->point() << std::endl;
         vertex2point.push_back(pt_1->point());
 
-        for_each_map_vertex(
+        for_each_map_vertex(obstacles,
             [&](Vertex_const_handle pt_2, int i_2, int ci_2,
                 std::optional<Arrangement_2::Ccb_halfedge_const_circulator>
                     c_2) {
               check_points(pt_1, i_1, c_1, ci_1, pt_2, i_2, c_2, ci_2);
             });
       });
+
+  return graph;
+
+  CGAL::Bbox_2 bbox;
+  for (auto v = obstacles.vertices_begin(); v != obstacles.vertices_end();
+       ++v) {
+    const Point_2 &p = v->point();
+    bbox += p.bbox();
+  }
+
+  Arrangement_2 input_arr = obstacles;
+  auto copy = bbox;
+  bbox.dilate(10);
+  Segment_2 segs[] = {
+      {{bbox.xmin(), bbox.ymin()}, {bbox.xmax(), bbox.ymin()}},
+      {{bbox.xmax(), bbox.ymin()}, {bbox.xmax(), bbox.ymax()}},
+      {{bbox.xmax(), bbox.ymax()}, {bbox.xmin(), bbox.ymax()}},
+      {{bbox.xmin(), bbox.ymax()}, {bbox.xmin(), bbox.ymin()}},
+  };
+  CGAL::insert_non_intersecting_curves(input_arr, std::begin(segs),
+                                       std::end(segs));
+  copy.dilate(5);
+  auto pt = CGAL::insert_point(input_arr, Point_2(copy.xmin(), copy.ymin()));
+  auto face = pt->face();
+  input_arr.remove_isolated_vertex(pt);
+
+  typedef CGAL::Rotational_sweep_visibility_2<Arrangement_2> Visibility_2;
+  Visibility_2 vis(input_arr);
+  Arrangement_2 output_arr;
+  for_each_map_vertex(obstacles,
+      [&](Vertex_const_handle pt_1, int i_1, int ci_1,
+          std::optional<Arrangement_2::Ccb_halfedge_const_circulator> c_1) {
+        std::cout << ci_1 << ": " << i_1 << ": " << pt_1->point() << std::endl;
+        vis.compute_visibility(pt_1->point(), face,
+                               output_arr);
+      });
+
+  graph = Graph(input_arr.number_of_vertices());
+
+  auto point2vertex = [&](Vertex_const_handle what) {
+    int res = -1;
+    for_each_map_vertex(
+        output_arr,
+        [&](Vertex_const_handle pt, int i_1, int,
+            std::optional<Arrangement_2::Ccb_halfedge_const_circulator> c_1) {
+          if (pt == what)
+            res = i_1;
+        });
+    return res;
+  };
+
+  for_each_map_vertex(
+      output_arr,
+      [&](Vertex_const_handle pt, int i_1, int,
+          std::optional<Arrangement_2::Ccb_halfedge_const_circulator> c_1) {
+        vertex2point.push_back(pt->point());
+      });
+
+  // O(N^2)
+  for (auto edge = output_arr.edges_begin(); edge != output_arr.edges_end(); ++edge) {
+    add_edge(edge->source(), point2vertex(edge->source()),
+             edge->target(), point2vertex(edge->target()));
+  }
+  return graph;
 }
 
 // Function to create an arrangement from a vector of polygons
@@ -332,10 +429,14 @@ void findShortestPath(const Graph &graph, Vertex source, Vertex target,
             << ":\n";
   std::cout << "Distance: " << distance[target] << "\n";
   std::cout << "Path: ";
-  for (Vertex v = target; v != source; v = predecessor[v]) {
-    std::cout << v << " ";
+  if (predecessor[target] == target) {
+    std::cout << "Didn't find!\n";
+  } else {
+    for (Vertex v = target; v != source; v = predecessor[v]) {
+      std::cout << v << " ";
+    }
+    std::cout << source << "\n";
   }
-  std::cout << source << "\n";
 }
 
 Arrangement_2 obstacles;
@@ -347,7 +448,7 @@ std::vector<std::vector<Point_2>> in_polygons;
 std::vector<Point_2> cur_polygon;
 std::optional<Point_2> start, end;
 
-void addPoint(float x, float y) {
+void addPoint(double x, double y) {
   cur_polygon.push_back({x, y});
 }
 
@@ -390,18 +491,18 @@ void finish() {
   in_polygons.clear();
   auto start_handle = CGAL::insert_point(obstacles, *start);
   auto end_handle = CGAL::insert_point(obstacles, *end);
-  visibility = Graph(obstacles.number_of_vertices());
+  // visibility = Graph(obstacles.number_of_vertices());
 
   // Compute visibility graph
-  computeVisibilityGraph(start_handle, end_handle, obstacles, visibility,
-                         vertex2point);
+  visibility =
+      computeVisibilityGraph(start_handle, end_handle, obstacles, vertex2point);
 
   // Find shortest path
   findShortestPath(visibility, 0, 1, predecessor, distance);
 }
 
 void drawInput() {
-  glLineWidth(1);
+  glLineWidth(2);
 
   // Draw input edges
   glColor3f(1.0f, 1.0f, 1.0f);
@@ -444,7 +545,7 @@ void drawInput() {
 }
 
 void drawObstacles() {
-  glLineWidth(1);
+  glLineWidth(3);
 
   glColor3f(1.0f, 1.0f, 1.0f);
   glBegin(GL_LINES);
@@ -458,7 +559,7 @@ void drawObstacles() {
   glEnd();
 
   // Draw arrangement vertices
-  glPointSize(2.0); // Set point size for vertices
+  glPointSize(4.0); // Set point size for vertices
   glBegin(GL_POINTS);
   for (auto vertex = obstacles.vertices_begin();
        vertex != obstacles.vertices_end(); ++vertex) {
@@ -469,9 +570,9 @@ void drawObstacles() {
 }
 
 void drawVisibilityGraph() {
-  glLineWidth(3);
+  glLineWidth(1);
 
-  glColor3f(0.5f, 1.0f, 0.5f);
+  glColor3f(0.0f, 1.0f, 0.0f);
 
   // Draw graph edges
   glBegin(GL_LINES);
@@ -498,10 +599,12 @@ void drawVisibilityGraph() {
 }
 
 void drawShortestPath() {
-  if (predecessor.empty())
+  if (predecessor.empty() || predecessor[1] == 1)
     return;
 
   glLineWidth(4);
+  glEnable(GL_LINE_STIPPLE);
+  glLineStipple(1, 0xFF00); // Pattern for dotted line
 
   glColor3f(1.0f, 0.0f, 0.0f);
 
@@ -514,6 +617,8 @@ void drawShortestPath() {
   glVertex2d(CGAL::to_double(vertex2point[0].x()),
              CGAL::to_double(vertex2point[0].y()));
   glEnd();
+
+  glDisable(GL_LINE_STIPPLE);
 
   // Draw shortest path vertices
   glPointSize(5.0); // Set point size for vertices
@@ -545,7 +650,7 @@ int main(int argc, char *argv[]) {
   glutInit(&argc, argv);
   glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGB | GLUT_DEPTH);
   glutInitWindowSize(800, 600);
-  glutCreateWindow("Boost Graph Visualization");
+  glutCreateWindow("An interesting title");
 
   // Register FreeGLUT callback functions
   glutDisplayFunc(renderScene);
